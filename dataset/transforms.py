@@ -36,9 +36,9 @@ specific_transform = transforms.Compose([
 
 class ClassBasedAugmentationSchedule:
     def __init__(self, confused=None, underrepresented=None, dominant=None, mst_policy_map=None):
-        self.confused = confused or {1, 3, 4}
-        self.underrepresented = underrepresented or {2, 5}
-        self.dominant = dominant or {0, 6}
+        self.confused = confused or {2, 4}
+        self.underrepresented = underrepresented or {3, 6, 7}
+        self.dominant = dominant or {0, 1}
         self.mst_policy_map = mst_policy_map or {}
 
     def get_transform(self, epoch, class_label, mst_group=None):

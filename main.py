@@ -1,9 +1,9 @@
 import os
 import torch # type: ignore
-from config import DEVICE, BASE_DATASET_DIR, RESULTS_DIR, EMBED_NPY, MIN_PER_COMBO, RESULT_DIR
+from config import  BASE_DATASET_DIR, EMBED_NPY, MIN_PER_COMBO, RESULTS_DIR
 from load import load_img_from_dir
 from  utils.utils import extract_color_metrics_and_estimate_mst
-from utils.utils import bin_mst_to_skin_group, stratified_sample_no_oversampling
+from utils.utils import bin_mst_to_skin_group, stratified_sample_enforced_mst_class
 from training.kfold import run_multiple_kfold_trials, summarize_multiple_trials
 from sklearn.preprocessing import LabelEncoder # type: ignore
 from torchvision import transforms # type: ignore
@@ -11,20 +11,19 @@ from torchvision import transforms # type: ignore
 if __name__ == "__main__":
     # === 🔧 Configuration ===
     dataset_dir = BASE_DATASET_DIR
-    save_model_root = RESULT_DIR
+    save_model_root = RESULTS_DIR
     triplet_path = EMBED_NPY
 
-    num_epochs = 100
+    num_epochs = 50
     batch_size = 64
-    n_splits = 5
+    n_splits = 2
     num_trials = 1
-    model_names = ["efficientnet_b3"]
+    model_names = ["efficientnet_b7"]
     attention_types = ["cbam"]
-    MIN_PER_COMBO = 1
 
 
     # === 📂 Load image paths and labels ===
-    X_paths, y_labels = load_img_from_dir(dataset_dir, max_images_per_class=10)
+    X_paths, y_labels = load_img_from_dir(dataset_dir, max_images_per_class=700)
     if not X_paths or not y_labels:
         raise RuntimeError(f"❌ No images or labels found in: {dataset_dir}")
 
@@ -63,21 +62,20 @@ if __name__ == "__main__":
     mst_groups = [entry["MST"] for entry in z]
     combo_counts = Counter([(label, mst) for label, mst in zip(y, mst_groups)])
 
-    #print("\n🔍 Available (class, MST) combos:")
-    #for combo, count in sorted(combo_counts.items()):
-        #print(f"{combo}: {count}")
+    print("\n🔍 Available (class, MST) combos:")
+    for combo, count in sorted(combo_counts.items()):
+        print(f"{combo}: {count}")
 
-    #print(f"🔢 Total filtered images before sampling: {len(X)}")
-    #print(f"❌ Skipped {len(skipped)} images due to failed MST estimation.")
-    #if skipped:
-        #print("🔍 Example skipped paths:", skipped[:3])
-
-    #print("🧪 Sample (class, MST):")
-    #for i in range(min(5, len(X))):
-        #print(f"{y[i]} — MST {z[i]['MST']} → Group {bin_mst_to_skin_group(z[i]['MST'])}")
+    print(f"🔢 Total filtered images before sampling: {len(X)}")
+    print(f"❌ Skipped {len(skipped)} images due to failed MST estimation.")
+    if skipped:
+        print("🔍 Example skipped paths:", skipped[:3])
+        print("🧪 Sample (class, MST):")
+    for i in range(min(5, len(X))):
+        print(f"{y[i]} — MST {z[i]['MST']} → Group {bin_mst_to_skin_group(z[i]['MST'])}")
 
     # === 🧪 Sample with fallback if 0 samples ===
-    X_sampled, y_sampled, z_sampled, combo_counts, _ = stratified_sample_no_oversampling(
+    X_sampled, y_sampled, z_sampled, combo_counts, _ = stratified_sample_enforced_mst_class(
         X, y, z,
         group_fn=bin_mst_to_skin_group,
         max_per_combo=250,
@@ -111,7 +109,7 @@ if __name__ == "__main__":
 
     # === 🔄 Transform pipeline ===
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize((300, 300)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])

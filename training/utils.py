@@ -1,6 +1,7 @@
 import os
 import copy
 import torch # type: ignore
+import numpy as np # type: ignore
 from sklearn.metrics import confusion_matrix # type: ignore
 import matplotlib.pyplot as plt # type: ignore
 import torch.nn as nn # type: ignore
@@ -95,58 +96,106 @@ def get_model_with_attention(model_name, num_classes, attention_type="none", pre
 
     return model
 
-def unfreeze_backbone(model, last_n_layers=None, base_lr=0.001):
-    children = list(model.base.children())
-    total = len(children)
-    param_groups = []
+def compute_classwise_alpha(
+    y_true,
+    y_pred,
+    num_classes=4,
+    normalize=True,
+    clip_range=(0.1, 3.0),
+    prev_alpha=None,
+    beta=0.9,
+    smoothing=True
+):
+    """
+    Compute smoothed, capped alpha weights for Focal Loss based on inverse recall.
 
-    for i, child in enumerate(children):
-        if last_n_layers is None or i >= total - last_n_layers:
-            for param in child.parameters():
-                param.requires_grad = True
-            param_groups.append({'params': child.parameters(), 'lr': base_lr * 0.01})  # Lower LR for base
-        else:
-            for param in child.parameters():
-                param.requires_grad = False
+    Args:
+        y_true (array): Ground truth labels.
+        y_pred (array): Predicted labels.
+        num_classes (int): Number of classes.
+        normalize (bool): Whether to normalize alpha to sum to num_classes.
+        clip_range (tuple): Min and max values to clip alpha.
+        prev_alpha (np.ndarray or torch.Tensor): Previous epoch's alpha for smoothing.
+        beta (float): Smoothing factor for EMA.
+        smoothing (bool): Whether to apply exponential smoothing.
 
-    print(f"🔥 Unfroze last {last_n_layers if last_n_layers else 'all'} EfficientNet blocks.")
-    return param_groups
+    Returns:
+        torch.Tensor: Alpha weights.
+    """
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
+    recalls = cm.diagonal() / (cm.sum(axis=1) + 1e-6)  # Avoid division by zero
+    alphas = 1.0 / (recalls + 1e-6)
+
+    # Clip alpha to avoid extreme weights
+    alphas = np.clip(alphas, clip_range[0], clip_range[1])
+
+    # Smooth with EMA using previous alpha
+    if smoothing and prev_alpha is not None:
+        if isinstance(prev_alpha, torch.Tensor):
+            prev_alpha = prev_alpha.detach().cpu().numpy()
+        alphas = beta * prev_alpha + (1 - beta) * alphas
+
+
+    # Normalize to keep total scale constant
+    if normalize:
+        alphas = alphas / alphas.sum() * num_classes
+
+    print("🔍 Dynamic Alpha (inverse recall):", np.round(alphas, 4))
+    return torch.tensor(alphas, dtype=torch.float32)
 
 class GradualUnfreezer:
-    def __init__(self, model, base_lr=0.001, start_block=None):
+    def __init__(self, model, base_lr=0.001, start_epoch=None, unfreeze_every=1, max_blocks=None, weight_decay=1e-4):
         self.model = model
         self.base_lr = base_lr
+        self.unfreeze_every = unfreeze_every
+        self.weight_decay = weight_decay
+
         self.children = list(model.base.children())
         self.total_blocks = len(self.children)
-        self.current_block = start_block if start_block is not None else self.total_blocks
+        self.max_blocks = max_blocks if max_blocks is not None else self.total_blocks
+        self.blocks_to_unfreeze = min(self.total_blocks, self.max_blocks)
+        self.start_epoch = start_epoch or 0
+        self.next_unfreeze_epoch = self.start_epoch
+        self.current_block = self.total_blocks  # Start frozen
 
     def step(self, optimizer, epoch):
-        if self.current_block <= 0:
-            return  # All blocks unfrozen
+        if self.current_block <= self.total_blocks - self.blocks_to_unfreeze:
+            return  # Done unfreezing target number of blocks
 
-        self.current_block -= 1
-        block = self.children[self.current_block]
-        for param in block.parameters():
-            param.requires_grad = True
-        optimizer.add_param_group({'params': block.parameters(), 'lr': self.base_lr * 0.01})
-        print(f"🔥 GradualUnfreezer: Unfroze block {self.current_block}/{self.total_blocks}")
+        if epoch >= self.next_unfreeze_epoch:
+            self.current_block -= 1
+            block = self.children[self.current_block]
+            for param in block.parameters():
+                param.requires_grad = True
+
+            # ✅ Add block parameters with weight decay
+            optimizer.add_param_group({
+                'params': block.parameters(),
+                'lr': self.base_lr * 0.01,
+                'weight_decay': self.weight_decay
+            })
+
+            print(f"🔥 GradualUnfreezer: Unfroze block {self.current_block}/{self.total_blocks}")
+            self.next_unfreeze_epoch += self.unfreeze_every
 
 class PostWarmupLRScheduler:
-    def __init__(self, optimizer, base_lr, rise_epochs=3, max_lr=None):
+    def __init__(self, optimizer, base_lr=0.001, rise_epochs=3, weight_decay=1e-4):
         self.optimizer = optimizer
         self.base_lr = base_lr
-        self.max_lr = max_lr if max_lr else base_lr
         self.rise_epochs = rise_epochs
-        self.epoch = 0
+        self.epoch_count = 0
+        self.weight_decay = weight_decay
 
     def step(self):
-        if self.epoch < self.rise_epochs:
-            factor = (self.epoch + 1) / self.rise_epochs
-            new_lr = self.base_lr * factor
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = min(new_lr, self.max_lr)
-            print(f"📈 LR Increase: Set LR to {new_lr:.6f}")
-            self.epoch += 1
+        if self.epoch_count >= self.rise_epochs:
+            return
+
+        new_lr = self.base_lr * (self.epoch_count + 1) / self.rise_epochs
+        for i, group in enumerate(self.optimizer.param_groups):
+            group['lr'] = new_lr
+        self.epoch_count += 1
+
+        print(f"📈 LR Increase: Set LR to {new_lr:.6f}")
 
 def setup_directories(base_path, model_name, fold=None, attention_type=None):
     """
@@ -174,7 +223,7 @@ def setup_directories(base_path, model_name, fold=None, attention_type=None):
 
     return checkpoint_path, best_weights_path, graph_dir, predictions_dir
 
-def compute_classwise_alpha(y_true, y_pred, num_classes=4, normalize=True):
+'''def compute_classwise_alpha(y_true, y_pred, num_classes=4, normalize=True):
     """
     Compute alpha weights for Focal Loss based on per-class recall.
     Classes with low recall get higher weights.
@@ -194,62 +243,117 @@ def compute_classwise_alpha(y_true, y_pred, num_classes=4, normalize=True):
 
     if normalize:
         alphas = alphas / alphas.sum() * num_classes  # Normalize to keep scale stable
+    
+    print("🔍 Dynamic Alpha (inverse recall):", np.round(alphas, 3))
 
-    return torch.tensor(alphas, dtype=torch.float32)
+    return torch.tensor(alphas, dtype=torch.float32)'''
 
 class FocalLoss(nn.Module):
     def __init__(self, alpha=None, gamma=2.5, reduction='mean'):
         """
         Args:
-            alpha (Tensor or None): Class weights to handle imbalance (e.g., tensor([0.8, 1.2, 1.0, ...])).
-                                   If None, all classes are weighted equally.
-            gamma (float): Focusing parameter. Higher values down-weight easy examples more.
-            reduction (str): Specifies reduction mode: 'mean', 'sum', or 'none'.
+            alpha (Tensor, Matrix or None): Class weights or class × MST weights of shape (C,) or (C, M).
+            gamma (float): Focusing parameter.
+            reduction (str): 'mean', 'sum', or 'none'.
         """
         super(FocalLoss, self).__init__()
-        self.alpha = alpha
+        self.alpha = alpha  # Can be 1D or 2D
         self.gamma = gamma
         self.reduction = reduction
 
-    def forward(self, inputs, targets):
-        """
-        Args:
-            inputs (Tensor): Model output logits of shape (B, C) — unnormalized scores.
-            targets (Tensor): Ground-truth class indices of shape (B,) — values in [0, C-1].
-        Returns:
-            Focal loss value (scalar or tensor depending on reduction).
-        """
-
-        # Apply log-softmax to get log-probabilities for each class
+    def forward(self, inputs, targets, mst_groups=None):
         logpt = F.log_softmax(inputs, dim=1)
-
-        # Convert log-probabilities to actual probabilities
         pt = torch.exp(logpt)
 
-        # Reshape targets to (B, 1) for proper indexing
         targets = targets.view(-1, 1)
-
-        # Gather the log probability corresponding to the true class for each sample
         logpt = logpt.gather(1, targets).squeeze(1)
         pt = pt.gather(1, targets).squeeze(1)
 
-        # If alpha is provided, apply class-specific weights
         if self.alpha is not None:
-
-            # Gather the alpha weight for each sample's true class
-            at = self.alpha.to(inputs.device).gather(0, targets.squeeze())
+            if self.alpha.dim() == 2 and mst_groups is not None:
+                # α per (class, mst_group)
+                indices = torch.stack([targets.squeeze(), mst_groups], dim=1)
+                at = self.alpha.to(inputs.device)[indices[:, 0], indices[:, 1]]
+            else:
+                # standard per-class α
+                at = self.alpha.to(inputs.device).gather(0, targets.squeeze())
             logpt = logpt * at
 
         loss = -1 * (1 - pt) ** self.gamma * logpt
 
-        # Apply the specified reduction (mean, sum, or none)
         if self.reduction == 'mean':
             return loss.mean()
         elif self.reduction == 'sum':
             return loss.sum()
         return loss
-    
+
+def compute_class_mst_alpha_matrix(y_true, y_pred, mst_bins, num_classes=7, num_mst_bins=10, normalize=True):
+    """
+    Compute alpha weights per (class, MST bin) based on inverse recall.
+    Low recall = high alpha.
+
+    Args:
+        y_true: list or array of true class indices (B,)
+        y_pred: list or array of predicted class indices (B,)
+        mst_bins: list or array of MST bin indices (B,)
+        num_classes: number of classes
+        num_mst_bins: number of MST bins (default 10 for full Monk scale)
+        normalize: normalize alphas per class row to sum to 1
+
+    Returns:
+        alpha_matrix: Tensor of shape [num_classes, num_mst_bins]
+    """
+    alpha_matrix = np.ones((num_classes, num_mst_bins), dtype=np.float32)
+
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+    mst_bins = np.array(mst_bins)
+
+    for cls in range(num_classes):
+        for mst in range(num_mst_bins):
+            mask = (y_true == cls) & (mst_bins == mst)
+            if mask.sum() == 0:
+                alpha_matrix[cls, mst] = 1.0  # fallback
+                continue
+
+            y_true_subset = y_true[mask]
+            y_pred_subset = y_pred[mask]
+
+            recall = np.sum(y_pred_subset == cls) / (len(y_true_subset) + 1e-6)
+            alpha_matrix[cls, mst] = 1.0 / (recall + 1e-6)  # inverse recall
+
+    if normalize:
+        # Normalize each row (per class) to sum to num_mst_bins
+        alpha_matrix = alpha_matrix / alpha_matrix.sum(axis=1, keepdims=True) * num_mst_bins
+
+    print("📊 Alpha Matrix (class × MST):")
+    print(np.round(alpha_matrix, 2))
+
+    return torch.tensor(alpha_matrix, dtype=torch.float32)
+
 def freeze_backbone(model):
     for param in model.base.parameters():
         param.requires_grad = False
     print("🧊 Backbone frozen.")
+
+def safe_criterion_call(criterion, outputs, labels, mst_groups=None):
+    try:
+        return criterion(outputs, labels, mst_groups)
+    except TypeError:
+        return criterion(outputs, labels)
+
+def plot_alpha_trends(alpha_history, num_classes, save_path=None):
+    alpha_array = torch.stack(alpha_history).cpu().numpy()
+    for class_idx in range(num_classes):
+        plt.plot(alpha_array[:, class_idx], label=f"Class {class_idx}")
+    plt.xlabel("Epoch")
+    plt.ylabel("Alpha Weight")
+    plt.title("Focal Loss Alpha Trend (Inverse Recall)")
+    plt.legend()
+    plt.grid(True)
+
+    if save_path:
+        plt.savefig(save_path)
+        print(f"📊 Alpha plot saved to: {save_path}")
+    else:
+        plt.show()

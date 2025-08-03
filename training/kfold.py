@@ -20,7 +20,7 @@ from training.eval import evaluate_model
 
 def kfold_cross_validation(
     X, y, label_encoder, model_names, attention_types, num_classes,
-    transform, num_folds=5, num_epochs=10, batch_size=32,
+    transform, num_folds=5, num_epochs=10, batch_size=64,
     save_root=RESULTS_DIR, triplet_embedding_dict=None
 ):
     device = DEVICE
@@ -53,27 +53,11 @@ def kfold_cross_validation(
         print(f"📊 Fold {fold+1} Class Distribution (Val): {dict(val_class_counts)}")
 
         y_tr = [class_mapping[lbl] for lbl in y_tr_orig]
-        '''
-        train_dataset = CustomDataset(
-            X_tr,
-            y_tr,
-            transform=transform,
-            include_skin_vec=True,
-            triplet_embedding_dict=triplet_embedding_dict,  # ✅ Add this line
-        )
-
-        val_dataset = CustomDataset(
-            X_val,
-            y_val,
-            transform=standard_transform,
-            include_skin_vec=True,
-            triplet_embedding_dict=triplet_embedding_dict,  # ✅ Add this line
-        )'''
 
 
-        CONFUSED_CLASSES = {1, 3, 4}        # East Asian, Latino_Hispanic, Middle Eastern
-        UNDERREPRESENTED_CLASSES = {2, 5}  # Indian, Southeast Asian
-        DOMINANT_CLASSES = {0, 6}          # Black, White
+        CONFUSED_CLASSES = {3}        # East Asian, Latino_Hispanic, Middle Eastern
+        UNDERREPRESENTED_CLASSES = {4,5,6}  # Indian, Southeast Asian
+        DOMINANT_CLASSES = {0,1,2}          # Black, White
 
         MST_POLICY_MAP = {
             "MST_3": "specific_transform",
@@ -134,7 +118,7 @@ def kfold_cross_validation(
                         weights_root=save_root,
                         resume=True,
                         use_film_before=True,
-                        use_film_in_cbam=False,
+                        use_film_in_cbam=True,
                         use_triplet_embedding=True,  # ✅ added
                         triplet_embedding_dim=512    # ✅ consistent with your model
                     ).to(device)
@@ -144,34 +128,33 @@ def kfold_cross_validation(
                         model=model,
                         device=device,
                         num_epochs=num_epochs,
-                        lr=0.0001,
+                        lr=0.001,
                         val_loader=val_loader,
                         save_model_path=save_root,
                         model_name=model_name,
                         fold=fold + 1,
                         resume_path=checkpoint_path,
-                        alpha=0.2,
+                        alpha=0.3,
                         mixup_enabled=True,
-                        warmup_epochs=3,
+                        warmup_epochs=5,
                         num_classes=fold_num_classes,
                         attention_type=attn_type,
                         y_train=y_tr
                     )
 
+                    print('getting ready for graphs')
 
                       # Choose appropriate Grad-CAM layer based on model type
-                    if model_name.lower() == "alexnet":
-                        gradcam_layer = model.features[-1]  # or model.attn if CBAM goes after features
-                    elif model_name.lower().startswith("resnet"):
-                        gradcam_layer = model.layer4[-1]
-                    elif model_name.lower().startswith("googlenet"):
-                        gradcam_layer = model.inception5b if hasattr(model, "inception5b") else model.backbone[-1]
-                    elif model_name.lower().startswith("efficientnet"):
-                        gradcam_layer = model.backbone.conv_head  # ✅ Safe for timm-efficientnet_b0
-                    elif model_name.lower().startswith("mobilenet"):
-                        gradcam_layer = model.backbone[-1] # ✅ for MobileNetV2
+                    if "efficientnet" in model_name.lower():
+                        gradcam_layer = model.base.blocks[-1]
+                    elif "resnet" in model_name.lower():
+                        gradcam_layer = model.base.layer4[-1]
+                    elif "mobilenet" in model_name.lower():
+                        gradcam_layer = model.base.features[-1]
                     else:
                         raise ValueError(f"Unsupported model for Grad-CAM: {model_name}")
+
+                    print('eval model graphs')
 
                     evaluate_model(
                         model=model,
@@ -183,7 +166,7 @@ def kfold_cross_validation(
                         mst_bins=[sample[3] for sample in val_dataset],
                         skin_groups=[sample[4] for sample in val_dataset],
                         visualize_gradcam=True,
-                        gradcam_layer=None,
+                        gradcam_layer=gradcam_layer,
                         graph_dir=graph_dir  # ✅ plots (confusion, tsne, etc.)
                     )
                     #print(classification_report(y_true, y_pred, digits=2))

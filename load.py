@@ -1,4 +1,5 @@
 import os
+
 def load_img_from_dir(dir_path, max_images_per_class=None):
     image_paths, labels = [], []
 

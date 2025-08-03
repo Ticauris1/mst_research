@@ -4,8 +4,10 @@ import pandas as pd # type: ignore
 import numpy as np # type: ignore
 from skimage import color # type: ignore
 from collections import defaultdict, Counter
+import torch.nn.functional as F # type: ignore
 import torch # type: ignore
-from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score  # type: ignore
+from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, confusion_matrix  # type: ignore
+
 
 def bin_mst_to_skin_group(mst_value: int) -> str:
     return f"MST_{mst_value}" if 1 <= mst_value <= 10 else "unknown"
@@ -121,6 +123,65 @@ def stratified_sample_no_oversampling(
 
     return X_filtered, y_filtered, z_filtered, sampled_combo_counts, skipped_combos
 
+def stratified_sample_enforced_mst_class(
+    X, y, z,
+    group_fn,
+    max_per_combo=250,
+    min_per_combo=10
+):
+    """
+    Stratified sampling by (class, MST group) without oversampling.
+    Keeps only combos that meet min_per_combo, and caps at max_per_combo.
+    
+    Args:
+        X: list of image paths or data
+        y: list of labels
+        z: list of metadata dicts
+        group_fn: function(meta[MST]) → MST group name
+        max_per_combo: max samples to keep per (class, MST) combo
+        min_per_combo: skip combos with fewer than this threshold
+        
+    Returns:
+        X_filtered, y_filtered, z_filtered, sampled_combo_counts, skipped_combos
+    """
+    combo_to_indices = defaultdict(list)
+
+    # Group by (class, skin_group)
+    for i, (label, meta) in enumerate(zip(y, z)):
+        skin_group = group_fn(meta.get("MST", -1))
+        if skin_group != "unknown":
+            combo_to_indices[(label, skin_group)].append(i)
+
+    # Enforce only combos with >= min_per_combo
+    valid_combos = {
+        (cls, group): indices
+        for (cls, group), indices in combo_to_indices.items()
+        if len(indices) >= min_per_combo
+    }
+
+    sampled_indices = []
+    sampled_combo_counts = Counter()
+
+    for (cls, group), indices in valid_combos.items():
+        selected = indices[:max_per_combo]  # ✅ No oversampling
+        sampled_indices.extend(selected)
+        sampled_combo_counts[(cls, group)] = len(selected)
+
+    skipped_combos = sorted(set(combo_to_indices.keys()) - set(sampled_combo_counts.keys()))
+
+    # Filter data
+    X_filtered = [X[i] for i in sampled_indices]
+    y_filtered = [y[i] for i in sampled_indices]
+    z_filtered = [z[i] for i in sampled_indices]
+
+    print(f"✅ Sampled {len(sampled_indices)} total from {len(sampled_combo_counts)} valid combos.")
+    if skipped_combos:
+        print(f"⚠️ Skipped {len(skipped_combos)} combos due to min_per_combo={min_per_combo}:")
+        for cls, group in skipped_combos:
+            print(f"   - Class {cls}, Group {group}")
+
+    return X_filtered, y_filtered, z_filtered, sampled_combo_counts, skipped_combos
+
 def extract_color_metrics_and_estimate_mst(image_path):
     avg_L, avg_h = extract_color_metrics(image_path)
     if avg_L is None or avg_h is None:
@@ -136,41 +197,37 @@ def extract_color_metrics_and_estimate_mst(image_path):
     }
 
 def extract_features(model, dataloader, device):
-    model.eval()
-    all_features = []
-    all_labels = []
+    actual_model = model.module if hasattr(model, "module") else model  # ✅ Safe unwrap
+    actual_model.eval()
+
+    features, labels = [], []
 
     with torch.no_grad():
         for batch in dataloader:
             if len(batch) == 6:
-                inputs, labels, skin_vecs, _, _, triplet_vecs = batch
+                inputs, labels_batch, skin_vecs, _, _, triplet_vecs = batch
             elif len(batch) == 5:
-                inputs, labels, skin_vecs, _, _ = batch
-                triplet_vecs = None
-            elif len(batch) == 3:
-                inputs, labels, skin_vecs = batch
+                inputs, labels_batch, skin_vecs, _, _ = batch
                 triplet_vecs = None
             else:
-                raise ValueError(f"Unexpected batch size: {len(batch)}")
+                inputs, labels_batch, skin_vecs = batch
+                triplet_vecs = None
 
             inputs = inputs.to(device)
-            labels = labels.to(device)
             skin_vecs = skin_vecs.to(device)
             triplet_vecs = triplet_vecs.to(device) if triplet_vecs is not None else None
 
-            # ✅ Expect model to support `return_features=True`
-            outputs = model(inputs, skin_vecs, triplet_embedding=triplet_vecs, return_features=True)
+            # Extract from model.base only (NOT full model)
+            feats = actual_model.extract_features(inputs, skin_vecs, triplet_vecs)
 
-            # Output is either (logits, features) or features only
-            if isinstance(outputs, tuple):
-                _, features = outputs
-            else:
-                features = outputs
+            # Flatten for t-SNE
+            if feats.ndim == 1:
+                feats  = feats.unsqueeze(0)  # edge case: batch_size = 1
 
-            all_features.append(features.cpu())
-            all_labels.append(labels.cpu())
+            features.append(feats.cpu().numpy())
+            labels.extend(labels_batch.cpu().numpy())
 
-    return torch.cat(all_features).numpy(), torch.cat(all_labels).numpy()
+    return np.vstack(features), labels
 
 def compute_fairness_by_group(y_true, y_probs, class_names, skin_groups=None):
     y_preds = np.argmax(y_probs, axis=1)
@@ -192,3 +249,26 @@ def compute_fairness_by_group(y_true, y_probs, class_names, skin_groups=None):
             "F1": f1_score(group_y_true, group_y_pred, average='macro', zero_division=0),
         })
     return pd.DataFrame(results)
+
+def compute_classwise_alpha(y_true, y_pred, num_classes=4, normalize=True):
+    """
+    Compute alpha weights for Focal Loss based on per-class recall.
+    Classes with low recall get higher weights.
+
+    Args:
+        y_true (list or array): Ground truth class indices.
+        y_pred (list or array): Predicted class indices.
+        num_classes (int): Total number of classes.
+        normalize (bool): Whether to normalize weights to sum to num_classes.
+
+    Returns:
+        torch.Tensor: Tensor of alpha weights for each class.
+    """
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
+    recalls = cm.diagonal() / (cm.sum(axis=1) + 1e-6)  # Avoid divide-by-zero
+    alphas = 1.0 / (recalls + 1e-6)  # Inverse recall: lower recall → higher weight
+
+    if normalize:
+        alphas = alphas / alphas.sum() * num_classes  # Normalize to keep scale stable
+
+    return torch.tensor(alphas, dtype=torch.float32)

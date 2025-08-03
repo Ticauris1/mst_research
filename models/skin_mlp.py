@@ -5,11 +5,11 @@ class Skin_Multi_Layer_Perceptron(nn.Module):
         super(Skin_Multi_Layer_Perceptron, self).__init__()
         self.mlp = nn.Sequential(
             nn.Linear(input_dim, hidden_dim1),
-            nn.LayerNorm(hidden_dim1),
+            nn.BatchNorm1d(hidden_dim1),
             nn.ReLU(),
             nn.Dropout(0.4),
             nn.Linear(hidden_dim1, hidden_dim2),
-            nn.LayerNorm(hidden_dim2),
+            nn.BatchNorm1d(hidden_dim2),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(hidden_dim2, output_dim),

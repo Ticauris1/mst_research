@@ -20,6 +20,7 @@ def evaluate_model(
     y_true, y_pred, y_probs, all_skin_vecs = [], [], [], []
     all_mst_bins, all_skin_groups = [], []
     all_inputs, all_labels, raw_skin_vecs = [], [], []
+    all_probs = []
 
     with torch.no_grad():
         for batch in test_loader:
@@ -51,14 +52,17 @@ def evaluate_model(
             all_skin_vecs.extend(skin_vecs.cpu().numpy())
             all_mst_bins.extend(mst_batch)
             all_skin_groups.extend(group_batch)
+            all_probs.append(probs.cpu()) 
 
             if visualize_gradcam:
                 all_inputs.append(inputs.cpu())
                 all_labels.append(labels.cpu())
                 raw_skin_vecs.append(skin_vecs.cpu())
 
+    print("get to Grad-CAM init")
     # === Grad-CAM Misclassified Samples ===
     if visualize_gradcam and gradcam_layer:
+        all_probs = torch.cat(all_probs)  # concatenate once only
         gradcam = GradCAM(model, gradcam_layer)
         gradcam_dir = os.path.join(graph_dir, "gradcam_misclassified")
         os.makedirs(gradcam_dir, exist_ok=True)
@@ -67,27 +71,45 @@ def evaluate_model(
         all_labels = torch.cat(all_labels)
         all_skin_vecs_tensor = torch.cat(raw_skin_vecs)
 
+        # === Step 1: Collect all misclassified samples with prediction confidence ===
+        print("get to Grad-CAM step 1")
+        misclassified = []
         for i in range(len(all_labels)):
             true_label = all_labels[i].item()
             pred_label = y_pred[i]
             if true_label != pred_label:
-                with torch.enable_grad():
-                    input_img = all_inputs[i:i+1].to(device).requires_grad_()
-                    skin_vec = all_skin_vecs_tensor[i:i+1].to(device)
-                    heatmap = gradcam.generate(input_img, skin_vec, target_class=pred_label)
+                confidence = all_probs[i][pred_label].item()
+                misclassified.append((i, true_label, pred_label, confidence))
 
-                    img_np = input_img.detach().squeeze().permute(1, 2, 0).cpu().numpy()
-                    img_np = (img_np * np.array([0.229, 0.224, 0.225])) + np.array([0.485, 0.456, 0.406])
-                    img_np = np.clip(img_np * 255.0, 0, 255).astype(np.uint8)
+        # === Step 2: Sort by lowest confidence ===
+        print("get to Grad-CAM step 2")
+        top_k = 10
+        misclassified = sorted(misclassified, key=lambda x: x[3])[:top_k]
 
-                    heatmap_resized = cv2.resize(heatmap, (img_np.shape[1], img_np.shape[0]))
-                    heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
-                    overlay = cv2.addWeighted(img_np, 0.6, heatmap_colored, 0.4, 0)
+        print(f"🖼️ Visualizing top {top_k} hard misclassified samples by Grad-CAM")
 
-                    save_path = os.path.join(gradcam_dir, f"sample{i}_true{true_label}_pred{pred_label}.png")
-                    cv2.imwrite(save_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+        # === Step 3: Visualize only top-k hard misclassified ===
+        print("get to Grad-CAM step 3")
+        for i, (idx, true_label, pred_label, confidence) in enumerate(misclassified):
+            with torch.enable_grad():
+                input_img = all_inputs[idx:idx+1].to(device).requires_grad_()
+                skin_vec = all_skin_vecs_tensor[idx:idx+1].to(device)
+                heatmap = gradcam.generate(input_img, skin_vec, target_class=pred_label)
+
+                img_np = input_img.detach().squeeze().permute(1, 2, 0).cpu().numpy()
+                img_np = (img_np * np.array([0.229, 0.224, 0.225])) + np.array([0.485, 0.456, 0.406])
+                img_np = np.clip(img_np * 255.0, 0, 255).astype(np.uint8)
+
+                heatmap_resized = cv2.resize(heatmap, (img_np.shape[1], img_np.shape[0]))
+                heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
+                overlay = cv2.addWeighted(img_np, 0.6, heatmap_colored, 0.4, 0)
+
+                save_path = os.path.join(gradcam_dir, f"hard{i}_true{true_label}_pred{pred_label}_conf{confidence:.2f}.png")
+                cv2.imwrite(save_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+
 
     # === Metrics and Reports ===
+    print("Make metric ")
     y_true = np.array(y_true)
     y_pred = np.array(y_pred)
     y_probs = np.array(y_probs)
@@ -126,6 +148,8 @@ def evaluate_model(
     pred_df.to_csv(pred_csv_path, index=False)
     print(f"✅ Predictions CSV saved to: {pred_csv_path}")
 
+    print(f"📊 Calling plot_evaluation_results for {model_name} — saving to {graph_dir}")
+    print("Plot results init")
     plot_evaluation_results(
         model_name=model_name,
         y_true=y_true,
@@ -172,6 +196,11 @@ def evaluate_model(
 
     if visualize_gradcam and gradcam_layer:
         print(f"✅ Grad-CAM misclassified overlays saved to: {os.path.join(graph_dir, 'gradcam_misclassified')}")
+
+        # Debug before plotting
+    print("Sample MST bins:", mst_bins[:10])
+    print("Unique MST bins:", set(mst_bins))
+    print("Classes:", set([class_names[y] for y in y_true]))
 
     mst_dist_path = os.path.join(graph_dir, f"{model_name}_mst_distribution_by_class.png")
     plot_mst_distribution_by_class(y_true, all_mst_bins, class_names, save_path=mst_dist_path)

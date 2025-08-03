@@ -286,6 +286,7 @@ def plot_evaluation_results(
     model_name, y_true, y_pred, y_probs, confusion,
     class_names, skin_vecs, mst_bins, skin_groups, output_dir
 ):
+    print(f"\n📍 Entered plot_evaluation_results() for {model_name}")
     os.makedirs(output_dir, exist_ok=True)
 
     # === Confusion Matrix ===

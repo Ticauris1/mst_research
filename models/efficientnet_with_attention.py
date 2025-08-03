@@ -60,6 +60,61 @@ class EfficientNetWithAttention(nn.Module):
 
     def forward(self, x, skin_vec, triplet_embedding=None, return_features=False):
         x = self.forward_features(x, skin_vec)
+
+        if x.dim() == 4:
+            x = F.adaptive_avg_pool2d(x, 1).view(x.size(0), -1)
+
+        features = x  # ✅ Save for t-SNE
+
+        skin_feat = self.skin_mlp(skin_vec)
+
+        # ✅ Ensure triplet_embedding shape is always valid if enabled
+        if self.use_triplet_embedding:
+            if triplet_embedding is None:
+                triplet_embedding = torch.zeros((x.size(0), 512), device=x.device)
+            elif triplet_embedding.dim() == 1:
+                triplet_embedding = triplet_embedding.unsqueeze(0)
+            elif triplet_embedding.shape[0] != x.shape[0]:
+                raise ValueError("Triplet embedding batch mismatch")
+
+        concat = [x, skin_feat]
+        if self.use_triplet_embedding:
+            concat.append(triplet_embedding)
+
+        final_feat = torch.cat(concat, dim=1)
+        logits = self.classifier(final_feat)
+
+        if return_features:
+            return logits, features  # ✅ Required for t-SNE extraction
+
+        return logits
+
+    def extract_features(self, x, skin_vec=None, triplet_embedding=None):
+        x = self.forward_features(x, skin_vec)
+
+        if x.dim() == 4:
+            x = F.adaptive_avg_pool2d(x, 1).view(x.size(0), -1)
+
+        skin_feat = self.skin_mlp(skin_vec)
+
+        if self.use_triplet_embedding:
+            if triplet_embedding is None:
+                triplet_embedding = torch.zeros((x.size(0), 512), device=x.device)
+            elif triplet_embedding.dim() == 1:
+                triplet_embedding = triplet_embedding.unsqueeze(0)
+            elif triplet_embedding.shape[0] != x.shape[0]:
+                raise ValueError("Triplet embedding batch mismatch")
+
+        concat = [x, skin_feat]
+        if self.use_triplet_embedding:
+            concat.append(triplet_embedding)
+
+        final_feat = torch.cat(concat, dim=1)
+        return final_feat
+
+
+    '''def forward(self, x, skin_vec, triplet_embedding=None, return_features=False):
+        x = self.forward_features(x, skin_vec)
         
         if x.dim() == 4:
             x = F.adaptive_avg_pool2d(x, 1).view(x.size(0), -1)
@@ -85,4 +140,6 @@ class EfficientNetWithAttention(nn.Module):
         if return_features:
             return logits, features  # ✅ Required for t-SNE extraction
 
-        return logits
+        return logits'''
+
+    
