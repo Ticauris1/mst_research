@@ -2,6 +2,7 @@ import os
 import cv2 # type: ignore
 import pandas as pd # type: ignore 
 import numpy as np # type: ignore
+import random
 from skimage import color # type: ignore
 from collections import defaultdict, Counter
 import torch.nn.functional as F # type: ignore
@@ -126,55 +127,73 @@ def stratified_sample_no_oversampling(
 def stratified_sample_enforced_mst_class(
     X, y, z,
     group_fn,
-    max_per_combo=250,
-    min_per_combo=10
+    per_class_targets,
+    min_per_combo=10,
+    per_class_caps=None,  # Optional cap for each class
+    allow_undersample_below_min_combo=True
 ):
     """
-    Stratified sampling by (class, MST group) without oversampling.
-    Keeps only combos that meet min_per_combo, and caps at max_per_combo.
-    
+    Stratified sampling prioritizing weaker-performing classes with optional per-class caps.
+
     Args:
-        X: list of image paths or data
-        y: list of labels
+        X: list of image paths
+        y: list of class labels
         z: list of metadata dicts
-        group_fn: function(meta[MST]) → MST group name
-        max_per_combo: max samples to keep per (class, MST) combo
-        min_per_combo: skip combos with fewer than this threshold
-        
+        group_fn: function(meta["MST"]) → MST group label
+        per_class_targets: dict mapping class name → target number of samples
+        min_per_combo: skip combos with fewer than this count (unless allowed)
+        per_class_caps: dict mapping class name → max cap on samples (optional)
+        allow_undersample_below_min_combo: whether to allow combos under min
+
     Returns:
-        X_filtered, y_filtered, z_filtered, sampled_combo_counts, skipped_combos
+        Filtered (X, y, z), sampled_combo_counts, skipped_combos
     """
     combo_to_indices = defaultdict(list)
+    class_to_total_indices = defaultdict(list)
 
-    # Group by (class, skin_group)
     for i, (label, meta) in enumerate(zip(y, z)):
         skin_group = group_fn(meta.get("MST", -1))
         if skin_group != "unknown":
             combo_to_indices[(label, skin_group)].append(i)
-
-    # Enforce only combos with >= min_per_combo
-    valid_combos = {
-        (cls, group): indices
-        for (cls, group), indices in combo_to_indices.items()
-        if len(indices) >= min_per_combo
-    }
+            class_to_total_indices[label].append(i)
 
     sampled_indices = []
     sampled_combo_counts = Counter()
+    skipped_combos = []
 
-    for (cls, group), indices in valid_combos.items():
-        selected = indices[:max_per_combo]  # ✅ No oversampling
-        sampled_indices.extend(selected)
-        sampled_combo_counts[(cls, group)] = len(selected)
+    for class_name, target_count in per_class_targets.items():
+        combos = [(cls, group) for (cls, group) in combo_to_indices if cls == class_name]
+        class_indices = []
 
-    skipped_combos = sorted(set(combo_to_indices.keys()) - set(sampled_combo_counts.keys()))
+        # Adjust target_count if a cap is defined
+        if per_class_caps and class_name in per_class_caps:
+            target_count = min(target_count, per_class_caps[class_name])
 
-    # Filter data
+        for combo in combos:
+            indices = combo_to_indices[combo]
+            if len(indices) < min_per_combo and not allow_undersample_below_min_combo:
+                skipped_combos.append(combo)
+                continue
+
+            fair_share = target_count // len(combos)
+            sample_count = min(len(indices), fair_share)
+            class_indices.extend(random.sample(indices, sample_count))
+            sampled_combo_counts[combo] = sample_count
+
+        # Top-up if still under target_count
+        if len(class_indices) < target_count:
+            remaining = list(set(class_to_total_indices[class_name]) - set(class_indices))
+            extra = min(target_count - len(class_indices), len(remaining))
+            class_indices.extend(random.sample(remaining, extra))
+
+        sampled_indices.extend(class_indices)
+
+    # Final filtering
     X_filtered = [X[i] for i in sampled_indices]
     y_filtered = [y[i] for i in sampled_indices]
     z_filtered = [z[i] for i in sampled_indices]
 
-    print(f"✅ Sampled {len(sampled_indices)} total from {len(sampled_combo_counts)} valid combos.")
+    print(f"✅ Sampled {len(sampled_indices)} total from {len(sampled_combo_counts)} (class, MST) combos.")
     if skipped_combos:
         print(f"⚠️ Skipped {len(skipped_combos)} combos due to min_per_combo={min_per_combo}:")
         for cls, group in skipped_combos:

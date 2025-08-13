@@ -9,31 +9,64 @@ import cv2 # type: ignore
 from evaluation.plot_utils import plot_evaluation_results, plot_tsne, plot_tsne_class_confusion, plot_mst_distribution_by_class
 from evaluation.grad_cam import GradCAM
 from utils.utils import extract_features
+import traceback
 
 def evaluate_model(
     model, test_loader, device, label_encoder=None,
     save_dir=None, model_name="model", mst_bins=None, skin_groups=None,
     gradcam_layer=None, visualize_gradcam=False,
-    graph_dir=None
+    graph_dir=None,
+    save_training_curves=False,
+    training_curves_data=None,
+    fold_classes=None # <--- ADDED: Original class labels present in this fold
 ):
+    """
+    Evaluates the model on the test set, generates reports, and plots various results.
+
+    Args:
+        model (nn.Module): The trained model to evaluate.
+        test_loader (DataLoader): DataLoader for the test/validation set.
+        device (torch.device): The device (CPU, CUDA, MPS) to run evaluation on.
+        label_encoder (sklearn.preprocessing.LabelEncoder, optional): Encoder to map numeric labels back to original names. Defaults to None.
+        save_dir (str, optional): Directory to save evaluation reports and predictions. Defaults to None.
+        model_name (str, optional): Name of the model for file naming. Defaults to "model".
+        mst_bins (list, optional): List of MST bin values for each sample. Defaults to None.
+        skin_groups (list, optional): List of skin group strings for each sample. Defaults to None.
+        gradcam_layer (torch.nn.Module, optional): The target layer for Grad-CAM visualization. Defaults to None.
+        visualize_gradcam (bool, optional): Whether to generate Grad-CAM visualizations. Defaults to False.
+        graph_dir (str, optional): Directory to save generated plots. Defaults to None.
+        save_training_curves (bool, optional): Whether to save training curve plots. Defaults to False.
+        training_curves_data (dict, optional): Dictionary containing lists of train/val loss, accuracy, and LRs. Defaults to None.
+        fold_classes (list, optional): List of original (global) class integers present in the current fold. Defaults to None.
+    """
     model.eval()
     y_true, y_pred, y_probs, all_skin_vecs = [], [], [], []
     all_mst_bins, all_skin_groups = [], []
     all_inputs, all_labels, raw_skin_vecs = [], [], []
     all_probs = []
+    all_raw_metadata = [] # To store the raw metadata dictionaries for plotting
 
     with torch.no_grad():
         for batch in test_loader:
-            if len(batch) == 6:
+            # Dynamically unpack batch based on its length.
+            # CustomDataset.__getitem__ now returns 7 items:
+            # (img_tensor, label, skin_vec_tensor, mst_bin, skin_group_string, embedding_tensor, original_metadata_dict_for_plot)
+            if len(batch) == 7: # Condition for the 7-item batch
+                inputs, labels, skin_vecs, mst_batch, group_batch, triplet_vecs, raw_meta_batch = batch
+            elif len(batch) == 6: # Fallback if CustomDataset doesn't return raw metadata (older CustomDataset)
                 inputs, labels, skin_vecs, mst_batch, group_batch, triplet_vecs = batch
-            elif len(batch) == 5:
+                # Create dummy metadata list if not provided by CustomDataset
+                raw_meta_batch = [{"MST": m} for m in mst_batch] if mst_batch else [{"MST": -1}] * len(labels)
+            elif len(batch) == 5: # With only 5 items, triplet_vecs and raw_meta_batch are missing
                 inputs, labels, skin_vecs, mst_batch, group_batch = batch
                 triplet_vecs = None
-            elif len(batch) == 3:
+                raw_meta_batch = [{"MST": m} for m in mst_batch] if mst_batch else [{"MST": -1}] * len(labels)
+            elif len(batch) == 3: # Fallback for datasets without MST/triplet/raw_meta (very old CustomDataset)
                 inputs, labels, skin_vecs = batch
-                mst_batch = ["unknown"] * len(labels)
+                mst_batch = [-1] * len(labels) # Use -1 for "unknown" MST bin
                 group_batch = ["unknown"] * len(labels)
                 triplet_vecs = None
+                raw_meta_batch = [{"MST": -1}] * len(labels) # Create dummy metadata dicts
             else:
                 raise ValueError(f"Unexpected batch size: {len(batch)}")
 
@@ -46,13 +79,15 @@ def evaluate_model(
             probs = F.softmax(outputs, dim=1)
             _, predicted = torch.max(probs, 1)
 
+            # Collect results
             y_true.extend(labels.cpu().numpy())
             y_pred.extend(predicted.cpu().numpy())
             y_probs.extend(probs.cpu().numpy())
             all_skin_vecs.extend(skin_vecs.cpu().numpy())
             all_mst_bins.extend(mst_batch)
             all_skin_groups.extend(group_batch)
-            all_probs.append(probs.cpu()) 
+            all_probs.append(probs.cpu())
+            all_raw_metadata.extend(raw_meta_batch) # Collect raw metadata for plotting functions
 
             if visualize_gradcam:
                 all_inputs.append(inputs.cpu())
@@ -62,7 +97,7 @@ def evaluate_model(
     print("get to Grad-CAM init")
     # === Grad-CAM Misclassified Samples ===
     if visualize_gradcam and gradcam_layer:
-        all_probs = torch.cat(all_probs)  # concatenate once only
+        all_probs = torch.cat(all_probs)
         gradcam = GradCAM(model, gradcam_layer)
         gradcam_dir = os.path.join(graph_dir, "gradcam_misclassified")
         os.makedirs(gradcam_dir, exist_ok=True)
@@ -114,10 +149,18 @@ def evaluate_model(
     y_pred = np.array(y_pred)
     y_probs = np.array(y_probs)
 
-    class_names = [str(cls) for cls in label_encoder.classes_] if label_encoder else [str(c) for c in sorted(set(y_true))]
+    # Determine class names using label_encoder if available, and fold_classes for alignment
+    # This is critical to fix the "list index out of range" error
+    if label_encoder and fold_classes is not None:
+        # Use label_encoder to get original string names for the classes present in this fold
+        class_names = [label_encoder.inverse_transform([cls])[0] for cls in sorted(fold_classes)]
+    else:
+        # Fallback if label_encoder or fold_classes is not provided/valid
+        class_names = [str(c) for c in sorted(np.unique(y_true))]
+
 
     acc = accuracy_score(y_true, y_pred)
-    report = classification_report(y_true, y_pred, target_names=class_names)
+    report = classification_report(y_true, y_pred, target_names=class_names, zero_division=0)
     cm = confusion_matrix(y_true, y_pred)
 
     print(f"\nAccuracy: {acc * 100:.2f}%")
@@ -157,10 +200,12 @@ def evaluate_model(
         y_probs=y_probs,
         confusion=cm,
         class_names=class_names,
-        skin_vecs=all_skin_vecs,
+        skin_vecs=all_raw_metadata, # Pass raw metadata for correct heatmap plotting
         mst_bins=all_mst_bins,
         skin_groups=all_skin_groups,
-        output_dir=graph_dir
+        output_dir=graph_dir,
+        save_training_curves=save_training_curves,
+        training_curves_data=training_curves_data
     )
     print(f"✅ Evaluation graphs saved to: {graph_dir}")
 
@@ -193,16 +238,10 @@ def evaluate_model(
             print(f"✅ Confusion-focused t-SNE saved to: {confusion_tsne_path}")
     except Exception as e:
         print(f"⚠️ t-SNE failed: {e}")
+        traceback.print_exc()
+
 
     if visualize_gradcam and gradcam_layer:
         print(f"✅ Grad-CAM misclassified overlays saved to: {os.path.join(graph_dir, 'gradcam_misclassified')}")
-
-        # Debug before plotting
-    print("Sample MST bins:", mst_bins[:10])
-    print("Unique MST bins:", set(mst_bins))
-    print("Classes:", set([class_names[y] for y in y_true]))
-
-    mst_dist_path = os.path.join(graph_dir, f"{model_name}_mst_distribution_by_class.png")
-    plot_mst_distribution_by_class(y_true, all_mst_bins, class_names, save_path=mst_dist_path)
 
     return acc, report, cm

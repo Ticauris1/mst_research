@@ -11,7 +11,7 @@ class Skin_Multi_Layer_Perceptron(nn.Module):
             nn.Linear(hidden_dim1, hidden_dim2),
             nn.BatchNorm1d(hidden_dim2),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
             nn.Linear(hidden_dim2, output_dim),
             nn.ReLU()
         )

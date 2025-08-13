@@ -6,7 +6,7 @@ class TwoLayerClassifierHead(nn.Module):
         self.head = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.5),
             nn.Linear(hidden_dim, output_dim)
         )
 

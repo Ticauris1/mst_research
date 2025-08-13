@@ -39,3 +39,18 @@ class GradCAM:
         heatmap /= np.max(heatmap) + 1e-6
 
         return heatmap
+    
+def get_gradcam_layer(model, model_name):
+    if hasattr(model, "get_gradcam_target_layer"):
+        return model.get_gradcam_target_layer()
+
+    if model_name.startswith("efficientnet") or model_name.startswith("densenet"):
+        return model.base.blocks[-1]
+    elif model_name.startswith("resnet"):
+        return model.base.layer4 if hasattr(model.base, 'layer4') else list(model.base.children())[-1]
+    elif model_name == "mobilenet_v2":
+        return model.base.features[-1]
+    elif model_name.startswith("vgg"):
+        return model.base.features[-1]
+    else:
+        raise ValueError(f"No Grad-CAM layer logic defined for: {model_name}")

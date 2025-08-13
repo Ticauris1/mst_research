@@ -6,16 +6,22 @@ from sklearn.metrics import confusion_matrix # type: ignore
 import matplotlib.pyplot as plt # type: ignore
 import torch.nn as nn # type: ignore
 import torch.nn.functional as F # type: ignore  
-from models.efficientnet_with_attention import EfficientNetWithAttention
+from models.efficientnet_with_attention import EfficientNetWithAttention, ResNetWithAttention# type: ignore
 import timm # type: ignore
 
 def get_output_channels(model_name):
-    if model_name in ["resnet18", "resnet50v2", "resnet101v2"]:
-        return 512 if model_name == "resnet18" else 2048
+    if model_name == "resnet18":
+        return 512
+    elif model_name in ["resnet50v2", "resnet101v2", "resnet101d", "resnet152d", "resnetrs101"]:
+        return 2048
     elif model_name in ["mobilenet_v2", "googlenet"]:
         return 1280
+    elif model_name.startswith("vgg"):
+        return 4096
     elif model_name == "alexnet":
         return 4096
+    elif model_name == "densenet201":
+        return 1920
     elif model_name.startswith("efficientnet_b"):
         tf_variant_map = {
             "efficientnet_b4": "tf_efficientnet_b4_ns",
@@ -26,10 +32,13 @@ def get_output_channels(model_name):
         tf_variant = tf_variant_map.get(model_name, model_name)
         backbone = timm.create_model(tf_variant, pretrained=True, num_classes=0)
         return backbone.num_features
-    elif model_name.startswith("vgg"):
-        return 4096
     else:
-        raise ValueError(f"Unknown model: {model_name}")
+        # Try loading with timm dynamically
+        try:
+            backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
+            return backbone.num_features
+        except Exception:
+            raise ValueError(f"Unknown model: {model_name}")
 
 def get_model_with_attention(model_name, num_classes, attention_type="none", pretrained=True,
                              fold=None, weights_root=None, resume=True, **kwargs):
@@ -38,8 +47,9 @@ def get_model_with_attention(model_name, num_classes, attention_type="none", pre
     use_triplet_embedding = kwargs.get("use_triplet_embedding", False)
     triplet_embedding_dim = kwargs.get("triplet_embedding_dim", 128)
     include_skin_vec = kwargs.get("include_skin_vec", True)
+    drop_path_rate = kwargs.get("drop_path_rate", 0.2)
 
-    # ✅ Remap tf-efficientnet variants for b4–b7
+    # EfficientNet Variants
     tf_variant_map = {
         "efficientnet_b4": "tf_efficientnet_b4_ns",
         "efficientnet_b5": "tf_efficientnet_b5_ns",
@@ -48,8 +58,6 @@ def get_model_with_attention(model_name, num_classes, attention_type="none", pre
     }
     tf_variant = tf_variant_map.get(model_name, model_name)
 
-    # Get output channels dynamically
-    C = get_output_channels(model_name)
     if model_name.startswith("efficientnet_b"):
         model = EfficientNetWithAttention(
             num_classes=num_classes,
@@ -60,12 +68,28 @@ def get_model_with_attention(model_name, num_classes, attention_type="none", pre
             use_triplet_embedding=use_triplet_embedding,
             triplet_embedding_dim=triplet_embedding_dim,
             include_skin_vec=include_skin_vec,
-            efficientnet_variant=tf_variant  # 👈 Use tf variant
+            efficientnet_variant=tf_variant
         )
+
+    elif model_name in ["resnet101v2", "resnet101d", "resnet152d", "resnetrs101"]:
+        model = ResNetWithAttention(
+            num_classes=num_classes,
+            backbone_name=model_name,
+            attention_type=attention_type,
+            use_film_before=use_film_before,
+            use_film_in_cbam=use_film_in_cbam,
+            use_triplet_embedding=use_triplet_embedding,
+            triplet_embedding_dim=triplet_embedding_dim,
+            include_skin_vec=include_skin_vec,
+            drop_path_rate=drop_path_rate
+        )
+
     else:
         raise ValueError(f"Unsupported model: {model_name}")
 
-    # 2. Load weights if available
+    return model
+
+    # === Load weights if available ===
     if resume and weights_root and fold is not None:
         subdir = f"{model_name}_{attention_type}"
         model_dir = os.path.join(weights_root, subdir)
@@ -90,9 +114,9 @@ def get_model_with_attention(model_name, num_classes, attention_type="none", pre
             print(f"💾 Loading best weights: {best_weights_path}")
             safe_load(best_weights_path)
         elif pretrained:
-            print(f"📦 No saved weights found — using pretrained weights for {model_name.upper()}")
+            print(f"No saved weights found — using pretrained weights for {model_name.upper()}")
         else:
-            print(f"⚠️ No pretrained or saved weights found for {model_name.upper()}")
+            print(f"No pretrained or saved weights found for {model_name.upper()}")
 
     return model
 
@@ -150,32 +174,54 @@ class GradualUnfreezer:
         self.unfreeze_every = unfreeze_every
         self.weight_decay = weight_decay
 
+        # ✅ Freeze all backbone params initially
+        for p in self.model.base.parameters():
+            p.requires_grad = False
+
+        # Break backbone into sequential children
         self.children = list(model.base.children())
         self.total_blocks = len(self.children)
         self.max_blocks = max_blocks if max_blocks is not None else self.total_blocks
-        self.blocks_to_unfreeze = min(self.total_blocks, self.max_blocks)
+
         self.start_epoch = start_epoch or 0
         self.next_unfreeze_epoch = self.start_epoch
-        self.current_block = self.total_blocks  # Start frozen
+        self.current_block = -1  # start before first block
+
+        print(f"🧊 Backbone frozen: {self.total_blocks} blocks in total")
+        print(f"📅 Will start unfreezing at epoch {self.start_epoch}, every {self.unfreeze_every} epoch(s)")
 
     def step(self, optimizer, epoch):
-        if self.current_block <= self.total_blocks - self.blocks_to_unfreeze:
-            return  # Done unfreezing target number of blocks
+        # If we've unfrozen all intended blocks, stop
+        if self.current_block >= self.max_blocks - 1:
+            return
 
+        # Check if it's time to unfreeze next block
         if epoch >= self.next_unfreeze_epoch:
-            self.current_block -= 1
+            self.current_block += 1
             block = self.children[self.current_block]
+
+            # Unfreeze block params
             for param in block.parameters():
                 param.requires_grad = True
 
-            # ✅ Add block parameters with weight decay
-            optimizer.add_param_group({
-                'params': block.parameters(),
-                'lr': self.base_lr * 0.01,
-                'weight_decay': self.weight_decay
-            })
+            # Avoid adding duplicate params to optimizer
+            opt_param_ids = {id(p)
+                             for g in optimizer.param_groups
+                             for p in g['params']}
+            new_params = [p for p in block.parameters() if id(p) not in opt_param_ids]
 
-            print(f"🔥 GradualUnfreezer: Unfroze block {self.current_block}/{self.total_blocks}")
+            if new_params:
+                optimizer.add_param_group({
+                    'params': new_params,
+                    'lr': self.base_lr * 0.01,
+                    'weight_decay': self.weight_decay
+                })
+                print(f"🔥 GradualUnfreezer: Unfroze block {self.current_block+1}/{self.total_blocks}")
+                #print(f"➕ Added {sum(p.numel() for p in new_params):,} params to optimizer")
+            #else:
+                #print(f"ℹ️ Block {self.current_block+1} already in optimizer — skipping add")
+
+            # Schedule next unfreeze
             self.next_unfreeze_epoch += self.unfreeze_every
 
 class PostWarmupLRScheduler:
@@ -195,7 +241,7 @@ class PostWarmupLRScheduler:
             group['lr'] = new_lr
         self.epoch_count += 1
 
-        print(f"📈 LR Increase: Set LR to {new_lr:.6f}")
+        #print(f"📈 LR Increase: Set LR to {new_lr:.6f}")
 
 def setup_directories(base_path, model_name, fold=None, attention_type=None):
     """
@@ -223,33 +269,8 @@ def setup_directories(base_path, model_name, fold=None, attention_type=None):
 
     return checkpoint_path, best_weights_path, graph_dir, predictions_dir
 
-'''def compute_classwise_alpha(y_true, y_pred, num_classes=4, normalize=True):
-    """
-    Compute alpha weights for Focal Loss based on per-class recall.
-    Classes with low recall get higher weights.
-
-    Args:
-        y_true (list or array): Ground truth class indices.
-        y_pred (list or array): Predicted class indices.
-        num_classes (int): Total number of classes.
-        normalize (bool): Whether to normalize weights to sum to num_classes.
-
-    Returns:
-        torch.Tensor: Tensor of alpha weights for each class.
-    """
-    cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
-    recalls = cm.diagonal() / (cm.sum(axis=1) + 1e-6)  # Avoid divide-by-zero
-    alphas = 1.0 / (recalls + 1e-6)  # Inverse recall: lower recall → higher weight
-
-    if normalize:
-        alphas = alphas / alphas.sum() * num_classes  # Normalize to keep scale stable
-    
-    print("🔍 Dynamic Alpha (inverse recall):", np.round(alphas, 3))
-
-    return torch.tensor(alphas, dtype=torch.float32)'''
-
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.5, reduction='mean'):
+    def __init__(self, alpha=None, gamma=3, reduction='mean'):
         """
         Args:
             alpha (Tensor, Matrix or None): Class weights or class × MST weights of shape (C,) or (C, M).
@@ -334,7 +355,7 @@ def compute_class_mst_alpha_matrix(y_true, y_pred, mst_bins, num_classes=7, num_
 def freeze_backbone(model):
     for param in model.base.parameters():
         param.requires_grad = False
-    print("🧊 Backbone frozen.")
+    #print("🧊 Backbone frozen.")
 
 def safe_criterion_call(criterion, outputs, labels, mst_groups=None):
     try:
