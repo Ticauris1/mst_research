@@ -104,9 +104,9 @@ if __name__ == "__main__":
 
 
     print(f"\n📦 Total Samples: {len(y)}")
-    #print("\n📊 Final Class Counts:")
-    #for cls, count in sorted(Counter(y).items()):
-    #   print(f"Class {cls}: {count}")
+    print("\n📊 Final Class Counts:")
+    for cls, count in sorted(Counter(y).items()):
+        print(f"Class {cls}: {count}")
 
     #print("\n✅ Final Sampled Class-MST Distribution:")
     #sampled_combo_labels = [f"{c}-{bin_mst_to_skin_group(m['MST'])}" for c, m in zip(y, z)]
