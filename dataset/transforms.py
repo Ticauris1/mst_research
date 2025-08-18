@@ -6,7 +6,8 @@ from torchvision import transforms # type: ignore
 from collections import defaultdict
 from torch.utils.data import Dataset # type: ignore
 from utils.utils import build_skin_vector, bin_mst_to_skin_group
-# === Transforms ===
+from sklearn.metrics import recall_score  # type: ignore
+
 # === Transforms ===
 standard_transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -68,18 +69,46 @@ geo_transform = transforms.Compose([
 ])
 
 class ClassBasedAugmentationSchedule:
-    def __init__(self, class_policy_map=None):
+    def __init__(self, class_policy_map=None, num_classes=0):
         self.class_policy_map = class_policy_map or {}
+        # Initialize performance with a perfect score to use base policies initially
+        self.class_performance = {i: 1.0 for i in range(num_classes)}
+
+    def update_performance(self, y_true, y_pred):
+        """Calculates and updates the recall for each class."""
+        # Get the unique labels that are present in the true values to avoid errors
+        present_labels = sorted(list(set(y_true)))
+        
+        # Calculate recall for the labels that are actually present
+        recalls = recall_score(y_true, y_pred, average=None, labels=present_labels, zero_division=0)
+        
+        # Create a dictionary mapping the present labels to their recall scores
+        recall_map = dict(zip(present_labels, recalls))
+        
+        # Update the performance metric for each class based on the new recall scores
+        for class_idx in self.class_performance.keys():
+            # If a class was present in this validation batch, update its score
+            # Otherwise, its score remains unchanged
+            if class_idx in recall_map:
+                self.class_performance[class_idx] = recall_map[class_idx]
+
+        print(f"📊 Updated Augmentation Performance Metrics: {self.class_performance}")
+
 
     def get_transform(self, epoch, class_label):
         class_label = int(class_label)
+        # Use a simple transform during warmup epochs
         if epoch < 5:
             return "standard_transform"
-        if class_label not in self.class_policy_map:
-            print(f"⚠️ Unknown class label: {class_label}, defaulting to standard_transform")
-        return self.class_policy_map.get(class_label, "standard_transform")
 
-
-
-
-
+        # Get the base policy for the given class
+        base_policy = self.class_policy_map.get(class_label, "standard_transform")
+        
+        # If a class's recall is below a threshold (e.g., 75%),
+        # switch to a more aggressive augmentation policy.
+        if self.class_performance.get(class_label, 1.0) < 0.75:
+            # You could even have multiple tiers of aggression
+            # print(f"Applying aggressive transform for class {class_label} due to low recall.")
+            return "aggressive_transform"
+        
+        return base_policy

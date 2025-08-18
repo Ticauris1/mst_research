@@ -88,42 +88,6 @@ def build_skin_vector(color_metrics):
     mst_onehot = one_hot_encode_mst(color_metrics["MST"])
     return np.array([ita_scaled, hue_scaled], dtype=np.float32).tolist() + mst_onehot.tolist()
 
-def stratified_sample_no_oversampling(
-    X, y, z,
-    group_fn,
-    max_per_combo=250,
-    min_per_combo=10
-):
-
-    combo_to_indices = defaultdict(list)
-    for i, (label, meta) in enumerate(zip(y, z)):
-        skin_group = group_fn(meta.get("MST", -1))
-        if skin_group != "unknown":
-            combo_to_indices[(label, skin_group)].append(i)
-
-    # Keep only combos with enough samples
-    valid_combos = {k: v for k, v in combo_to_indices.items() if len(v) >= min_per_combo}
-
-    sampled_indices = []
-    sampled_combo_counts = Counter()
-
-    for (cls, group), indices in valid_combos.items():
-        selected = indices[:max_per_combo]  # no upsampling
-        sampled_indices.extend(selected)
-        sampled_combo_counts[(cls, group)] = len(selected)
-
-    skipped_combos = sorted(set(combo_to_indices.keys()) - set(sampled_combo_counts.keys()))
-
-    X_filtered = [X[i] for i in sampled_indices]
-    y_filtered = [y[i] for i in sampled_indices]
-    z_filtered = [z[i] for i in sampled_indices]
-
-    print(f"✅ Sampled {len(sampled_indices)} total from {len(sampled_combo_counts)} combos")
-    if skipped_combos:
-        print(f"⚠️ Skipped {len(skipped_combos)} combos due to min_per_combo={min_per_combo}: {skipped_combos}")
-
-    return X_filtered, y_filtered, z_filtered, sampled_combo_counts, skipped_combos
-
 def stratified_sample_enforced_mst_class(
     X, y, z,
     group_fn,
@@ -201,20 +165,6 @@ def stratified_sample_enforced_mst_class(
 
     return X_filtered, y_filtered, z_filtered, sampled_combo_counts, skipped_combos
 
-def extract_color_metrics_and_estimate_mst(image_path):
-    avg_L, avg_h = extract_color_metrics(image_path)
-    if avg_L is None or avg_h is None:
-        return None
-
-    ita = np.degrees(np.arctan((avg_L - 50) / avg_h))
-    mst_bin = estimate_mst_from_ita(ita)
-
-    return {
-        "L": avg_L,
-        "h": avg_h,
-        "MST": mst_bin
-    }
-
 def extract_features(model, dataloader, device):
     actual_model = model.module if hasattr(model, "module") else model  # ✅ Safe unwrap
     actual_model.eval()
@@ -248,6 +198,7 @@ def extract_features(model, dataloader, device):
 
     return np.vstack(features), labels
 
+
 def compute_fairness_by_group(y_true, y_probs, class_names, skin_groups=None):
     y_preds = np.argmax(y_probs, axis=1)
     results = []
@@ -269,25 +220,3 @@ def compute_fairness_by_group(y_true, y_probs, class_names, skin_groups=None):
         })
     return pd.DataFrame(results)
 
-def compute_classwise_alpha(y_true, y_pred, num_classes=4, normalize=True):
-    """
-    Compute alpha weights for Focal Loss based on per-class recall.
-    Classes with low recall get higher weights.
-
-    Args:
-        y_true (list or array): Ground truth class indices.
-        y_pred (list or array): Predicted class indices.
-        num_classes (int): Total number of classes.
-        normalize (bool): Whether to normalize weights to sum to num_classes.
-
-    Returns:
-        torch.Tensor: Tensor of alpha weights for each class.
-    """
-    cm = confusion_matrix(y_true, y_pred, labels=list(range(num_classes)))
-    recalls = cm.diagonal() / (cm.sum(axis=1) + 1e-6)  # Avoid divide-by-zero
-    alphas = 1.0 / (recalls + 1e-6)  # Inverse recall: lower recall → higher weight
-
-    if normalize:
-        alphas = alphas / alphas.sum() * num_classes  # Normalize to keep scale stable
-
-    return torch.tensor(alphas, dtype=torch.float32)

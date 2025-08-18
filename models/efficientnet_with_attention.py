@@ -89,17 +89,13 @@ class ResNetWithAttention(nn.Module):
         return children[-1] if len(children) else self.base
 
     def forward_features(self, x, skin_vec):
-        #print(f"[ResNet] in: {x.shape}")                # [B,3,224,224]
         x = self.base.forward_features(x)
-        #print(f"[ResNet] after backbone: {x.shape}")    # [B,C,H,W]
         if self.use_film_before:
             assert skin_vec is not None and skin_vec.dim() == 2, \
                 f"[ResNet] FiLM needs skin_vec [B,12], got {None if skin_vec is None else skin_vec.shape}"
-            #print(f"[ResNet] FiLM on {x.shape} with skin {skin_vec.shape}")
             x = self.film(x, skin_vec)
         # Only pass skin_vec into CBAM when CBAM is used
         x = self.attn(x, skin_vec) if isinstance(self.attn, CBAM) else self.attn(x)
-        #print(f"[ResNet] after attn: {x.shape}")        # [B,C,H,W]
         return x
 
     def forward(self, x, skin_vec=None, triplet_embedding=None, return_features=False):
@@ -114,29 +110,24 @@ class ResNetWithAttention(nn.Module):
 
         # Feature maps
         feat = self.forward_features(x, skin_vec)
-        #print(f"[ResNet] pre-pool: {feat.shape}")
         assert feat.dim() == 4 and feat.size(1) == self._feat_dim, \
             f"[ResNet] Expected [B,{self._feat_dim},H,W], got {feat.shape}"
 
         # Global pool -> [B,C]
         feat = F.adaptive_avg_pool2d(feat, 1).view(B, -1)
-        #print(f"[ResNet] pooled feat: {feat.shape}")    # [B,C]
         features = feat  # for TSNE/etc.
 
         # Skin -> [B,8]
         skin_feat = self.skin_mlp(skin_vec)
-        #print(f"[ResNet] skin_feat: {skin_feat.shape}")
 
         # Triplet -> [B,512] (if enabled)
         if self.use_triplet_embedding:
-            #print(f"[ResNet] triplet in: {None if triplet_embedding is None else triplet_embedding.shape}")
             if triplet_embedding is None:
                 triplet_embedding = torch.zeros((B, self.triplet_embedding_dim), device=x.device, dtype=feat.dtype)
             elif triplet_embedding.dim() == 1:
                 triplet_embedding = triplet_embedding.unsqueeze(0)
             elif triplet_embedding.shape[0] != B:
                 raise ValueError(f"[ResNet] Triplet batch mismatch {triplet_embedding.shape[0]} vs {B}")
-            #print(f"[ResNet] triplet ok: {triplet_embedding.shape}")
 
         # ---- Fusion ----
         if self.fusion_mode == "concat":
@@ -223,17 +214,13 @@ class EfficientNetWithAttention(nn.Module):
         self.classifier = TwoLayerClassifierHead(input_dim=self.expected_final_dim, output_dim=num_classes)
 
     def forward_features(self, x, skin_vec):
-        #print(f"[EffNet] in: {x.shape}")  # [B,3,224,224]
         x = self.base.forward_features(x)
-        #print(f"[EffNet] after backbone: {x.shape}")  # [B,C,H,W]
         if self.use_film_before:
-            #print(f"[EffNet] FiLM on {x.shape} with skin {skin_vec.shape}")
             x = self.film(x, skin_vec)
         if isinstance(self.attn, CBAM):
             x = self.attn(x, skin_vec)
         else:
             x = self.attn(x)
-        #print(f"[EffNet] after attn: {x.shape}")  # [B,C,H,W]
         return x
 
     def forward(self, x, skin_vec=None, triplet_embedding=None, return_features=False):
@@ -245,22 +232,18 @@ class EfficientNetWithAttention(nn.Module):
         assert x.dim() == 4, f"[EffNet] expected 4D before pool, got {x.shape}"
 
         x = F.adaptive_avg_pool2d(x, 1).view(B, -1)  # [B,C]
-        #print(f"[EffNet] pooled feat: {x.shape}")
         features = x
 
         skin_feat = self.skin_mlp(skin_vec)          # [B,8]
-        #print(f"[EffNet] skin_feat: {skin_feat.shape}")
 
         # Triplet
         if self.use_triplet_embedding:
-            #print(f"[EffNet] triplet in: {None if triplet_embedding is None else triplet_embedding.shape}")
             if triplet_embedding is None:
                 triplet_embedding = torch.zeros((B, self.triplet_embedding_dim), device=x.device)
             elif triplet_embedding.dim() == 1:
                 triplet_embedding = triplet_embedding.unsqueeze(0)
             elif triplet_embedding.shape[0] != B:
                 raise ValueError(f"[EffNet] Triplet batch mismatch {triplet_embedding.shape[0]} vs {B}")
-            #print(f"[EffNet] triplet ok: {triplet_embedding.shape}")
 
         parts = [x, skin_feat] + ([triplet_embedding] if self.use_triplet_embedding else [])
         final_feat = torch.cat(parts, dim=1)
@@ -278,34 +261,3 @@ class EfficientNetWithAttention(nn.Module):
         return (logits, features) if return_features else logits
 
 
-
-    '''def forward(self, x, skin_vec, triplet_embedding=None, return_features=False):
-        x = self.forward_features(x, skin_vec)
-        
-        if x.dim() == 4:
-            x = F.adaptive_avg_pool2d(x, 1).view(x.size(0), -1)
-        
-        features = x  # ✅ Save for t-SNE
-
-        skin_feat = self.skin_mlp(skin_vec)
-
-        if self.use_triplet_embedding and triplet_embedding is not None:
-            if triplet_embedding.dim() == 1:
-                triplet_embedding = triplet_embedding.unsqueeze(0)
-            elif triplet_embedding.shape[0] != x.shape[0]:
-                raise ValueError("Triplet embedding batch mismatch")
-
-        concat = [x, skin_feat]
-        if self.use_triplet_embedding and triplet_embedding is not None:
-            concat.append(triplet_embedding)
-
-        final_feat = torch.cat(concat, dim=1)
-
-        logits = self.classifier(final_feat)
-
-        if return_features:
-            return logits, features  # ✅ Required for t-SNE extraction
-
-        return logits'''
-
- 

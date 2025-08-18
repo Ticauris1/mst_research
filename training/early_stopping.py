@@ -15,7 +15,7 @@ class EarlyStopper:
         else:
             self.counter += 1
             if self.verbose:
-                print(f"⏳ Early stop counter: {self.counter}/{self.patience}")
+                print(f"Early stop counter: {self.counter}/{self.patience}")
             return self.counter >= self.patience
 
     def get_best_weights(self):

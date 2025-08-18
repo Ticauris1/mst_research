@@ -24,5 +24,5 @@ def load_img_from_dir(dir_path, max_images_per_class=None):
             if max_images_per_class and count >= max_images_per_class:
                 break
 
-    print(f"✅ Loaded {len(image_paths)} usable images.")
+    print(f"✅ Loaded {len(image_paths)} pre-filtered images.")
     return image_paths, labels

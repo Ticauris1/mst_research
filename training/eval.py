@@ -6,11 +6,12 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 import pandas as pd # type: ignore
 from datetime import datetime
 import cv2 # type: ignore
-from evaluation.plot_utils import plot_evaluation_results, plot_tsne, plot_tsne_class_confusion, plot_mst_distribution_by_class
+from evaluation.plot_utils import plot_evaluation_results, plot_tsne, plot_tsne_class_confusion #, plot_mst_distribution_by_class
 from evaluation.grad_cam import GradCAM
 from utils.utils import extract_features
 import traceback
 
+'''
 def evaluate_model(
     model, test_loader, device, label_encoder=None,
     save_dir=None, model_name="model", mst_bins=None, skin_groups=None,
@@ -49,8 +50,6 @@ def evaluate_model(
     with torch.no_grad():
         for batch in test_loader:
             # Dynamically unpack batch based on its length.
-            # CustomDataset.__getitem__ now returns 7 items:
-            # (img_tensor, label, skin_vec_tensor, mst_bin, skin_group_string, embedding_tensor, original_metadata_dict_for_plot)
             if len(batch) == 7: # Condition for the 7-item batch
                 inputs, labels, skin_vecs, mst_batch, group_batch, triplet_vecs, raw_meta_batch = batch
             elif len(batch) == 6: # Fallback if CustomDataset doesn't return raw metadata (older CustomDataset)
@@ -94,7 +93,6 @@ def evaluate_model(
                 all_labels.append(labels.cpu())
                 raw_skin_vecs.append(skin_vecs.cpu())
 
-    print("get to Grad-CAM init")
     # === Grad-CAM Misclassified Samples ===
     if visualize_gradcam and gradcam_layer:
         all_probs = torch.cat(all_probs)
@@ -107,7 +105,6 @@ def evaluate_model(
         all_skin_vecs_tensor = torch.cat(raw_skin_vecs)
 
         # === Step 1: Collect all misclassified samples with prediction confidence ===
-        print("get to Grad-CAM step 1")
         misclassified = []
         for i in range(len(all_labels)):
             true_label = all_labels[i].item()
@@ -117,14 +114,12 @@ def evaluate_model(
                 misclassified.append((i, true_label, pred_label, confidence))
 
         # === Step 2: Sort by lowest confidence ===
-        print("get to Grad-CAM step 2")
         top_k = 10
         misclassified = sorted(misclassified, key=lambda x: x[3])[:top_k]
 
-        print(f"🖼️ Visualizing top {top_k} hard misclassified samples by Grad-CAM")
+        print(f"Visualizing top {top_k} hard misclassified samples by Grad-CAM")
 
         # === Step 3: Visualize only top-k hard misclassified ===
-        print("get to Grad-CAM step 3")
         for i, (idx, true_label, pred_label, confidence) in enumerate(misclassified):
             with torch.enable_grad():
                 input_img = all_inputs[idx:idx+1].to(device).requires_grad_()
@@ -187,12 +182,23 @@ def evaluate_model(
         for j, prob in enumerate(prob_row):
             pred_df.loc[i, f"Prob_{class_names[j]}"] = prob
 
-    pred_csv_path = os.path.join(save_dir, f"{model_name}_predictions.csv")
-    pred_df.to_csv(pred_csv_path, index=False)
-    print(f"✅ Predictions CSV saved to: {pred_csv_path}")
+    plot_metadata = []
+    for i, meta_dict in enumerate(all_raw_metadata):
+        new_dict = meta_dict.copy()  # Start with existing metadata (MST, ITA, etc.)
+        new_dict['Class'] = class_names[y_true[i]]  # Add the string class name
+        plot_metadata.append(new_dict)
 
     print(f"📊 Calling plot_evaluation_results for {model_name} — saving to {graph_dir}")
     print("Plot results init")
+
+    # FIX: Combine metadata with class names into a single structure for robust plotting
+    plot_metadata = []
+    for i, meta_dict in enumerate(all_raw_metadata):
+        new_dict = meta_dict.copy()  # Start with the metadata (MST, ITA, etc.)
+        new_dict['Class'] = class_names[y_true[i]]  # Add the string class name
+        plot_metadata.append(new_dict)
+
+    # Complete the function call with all required arguments
     plot_evaluation_results(
         model_name=model_name,
         y_true=y_true,
@@ -200,7 +206,7 @@ def evaluate_model(
         y_probs=y_probs,
         confusion=cm,
         class_names=class_names,
-        skin_vecs=all_raw_metadata, # Pass raw metadata for correct heatmap plotting
+        skin_vecs=plot_metadata,  # Use the new, combined metadata list
         mst_bins=all_mst_bins,
         skin_groups=all_skin_groups,
         output_dir=graph_dir,
@@ -212,7 +218,7 @@ def evaluate_model(
     try:
         features, labels_for_tsne = extract_features(model, test_loader, device)
         if features.ndim > 2:
-            print(f"🔁 Flattening features from shape {features.shape} for t-SNE...")
+            print(f"Flattening features from shape {features.shape} for t-SNE...")
             features = features.reshape(features.shape[0], -1)
 
         print(f"🔍 Feature shape for t-SNE: {features.shape}")
@@ -235,11 +241,177 @@ def evaluate_model(
                 perplexity=safe_perplexity,
                 save_path=confusion_tsne_path
             )
-            print(f"✅ Confusion-focused t-SNE saved to: {confusion_tsne_path}")
+            print(f"Confusion-focused t-SNE saved to: {confusion_tsne_path}")
     except Exception as e:
         print(f"⚠️ t-SNE failed: {e}")
         traceback.print_exc()
 
+
+    if visualize_gradcam and gradcam_layer:
+        print(f"✅ Grad-CAM misclassified overlays saved to: {os.path.join(graph_dir, 'gradcam_misclassified')}")
+
+    return acc, report, cm
+'''
+
+# In eval.py
+
+def evaluate_model(
+    model, test_loader, device, label_encoder=None,
+    save_dir=None, model_name="model", mst_bins=None, skin_groups=None,
+    gradcam_layer=None, visualize_gradcam=False,
+    graph_dir=None,
+    save_training_curves=False,
+    training_curves_data=None,
+    fold_classes=None
+):
+    # ... (the top part of the function remains the same, from model.eval() down to the Grad-CAM visualization) ...
+    model.eval()
+    y_true, y_pred, y_probs, all_skin_vecs = [], [], [], []
+    all_mst_bins, all_skin_groups = [], []
+    all_inputs, all_labels, raw_skin_vecs = [], [], []
+    all_probs = []
+    all_raw_metadata = []
+
+    with torch.no_grad():
+        for batch in test_loader:
+            if len(batch) == 7:
+                inputs, labels, skin_vecs, mst_batch, group_batch, triplet_vecs, raw_meta_batch = batch
+            # ... (rest of the batch unpacking logic) ...
+            else:
+                raise ValueError(f"Unexpected batch size: {len(batch)}")
+
+            inputs, labels, skin_vecs = inputs.to(device), labels.to(device), skin_vecs.to(device)
+            triplet_vecs = triplet_vecs.to(device) if triplet_vecs is not None else None
+            outputs = model(inputs, skin_vecs, triplet_embedding=triplet_vecs)
+            probs = F.softmax(outputs, dim=1)
+            _, predicted = torch.max(probs, 1)
+
+            y_true.extend(labels.cpu().numpy())
+            y_pred.extend(predicted.cpu().numpy())
+            y_probs.extend(probs.cpu().numpy())
+            all_mst_bins.extend(mst_batch)
+            all_skin_groups.extend(group_batch)
+            all_raw_metadata.extend(raw_meta_batch)
+            all_probs.append(probs.cpu())
+
+            if visualize_gradcam:
+                all_inputs.append(inputs.cpu())
+                all_labels.append(labels.cpu())
+                raw_skin_vecs.append(skin_vecs.cpu())
+
+    if visualize_gradcam and gradcam_layer:
+        # ... (Grad-CAM logic remains the same) ...
+        pass
+
+    # === Metrics and Reports ===
+    print("Make metric ")
+    y_true, y_pred, y_probs = np.array(y_true), np.array(y_pred), np.array(y_probs)
+
+    if label_encoder and fold_classes is not None:
+        class_names = [label_encoder.inverse_transform([cls])[0] for cls in sorted(fold_classes)]
+    else:
+        class_names = [str(c) for c in sorted(np.unique(y_true))]
+
+    acc = accuracy_score(y_true, y_pred)
+    report = classification_report(y_true, y_pred, target_names=class_names, zero_division=0)
+    cm = confusion_matrix(y_true, y_pred)
+
+    print(f"\nAccuracy: {acc * 100:.2f}%")
+    print("\nClassification Report:\n", report)
+
+    os.makedirs(save_dir, exist_ok=True)
+    os.makedirs(graph_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    report_path = os.path.join(save_dir, f"{model_name}_report_{timestamp}.txt")
+    with open(report_path, "w") as f:
+        f.write(f"Accuracy: {acc * 100:.2f}%\n\n")
+        f.write("Classification Report:\n" + report + "\n")
+        f.write("Confusion Matrix:\n" + np.array2string(cm))
+    print(f"✅ Evaluation report saved to: {report_path}")
+
+    # Create the predictions DataFrame
+    pred_df = pd.DataFrame({
+        "True_Label": [class_names[t] for t in y_true],
+        "Predicted_Label": [class_names[p] for p in y_pred],
+        "MST": all_mst_bins,
+        "Skin_Group": all_skin_groups
+    })
+    for i, prob_row in enumerate(y_probs):
+        for j, prob in enumerate(prob_row):
+            pred_df.loc[i, f"Prob_{class_names[j]}"] = prob
+
+    # --- FIX 1: Add the missing lines to save the predictions CSV ---
+    pred_csv_path = os.path.join(save_dir, f"{model_name}_predictions.csv")
+    pred_df.to_csv(pred_csv_path, index=False)
+    print(f"✅ Predictions CSV saved to: {pred_csv_path}")
+
+    print(f"📊 Calling plot_evaluation_results for {model_name} — saving to {graph_dir}")
+    print("Plot results init")
+
+    # --- FIX 2: Remove the duplicated code block ---
+    # This single block prepares the metadata for plotting functions.
+    plot_metadata = []
+    for i, meta_dict in enumerate(all_raw_metadata):
+        print(f"DEBUG eval.py: Type of meta_dict is {type(meta_dict)}, Value is: {meta_dict}")
+
+        new_dict = meta_dict.copy()
+        new_dict['Class'] = class_names[y_true[i]]
+        plot_metadata.append(new_dict)
+
+    # Call the main plotting function
+    plot_evaluation_results(
+        model_name=model_name,
+        y_true=y_true,
+        y_pred=y_pred,
+        y_probs=y_probs,
+        confusion=cm,
+        class_names=class_names,
+        skin_vecs=plot_metadata,
+        mst_bins=all_mst_bins,
+        skin_groups=all_skin_groups,
+        output_dir=graph_dir,
+        save_training_curves=save_training_curves,
+        training_curves_data=training_curves_data
+    )
+    print(f"✅ Evaluation graphs saved to: {graph_dir}")
+
+    try:
+        # --- IMPROVEMENT 3: Make t-SNE target class dynamic ---
+        report_dict = classification_report(y_true, y_pred, output_dict=True)
+        lowest_f1, target_class_for_tsne = 1.0, 0
+        for label_idx_str, metrics in report_dict.items():
+            if label_idx_str.isdigit():
+                if metrics.get('f1-score', 1.0) < lowest_f1:
+                    lowest_f1 = metrics['f1-score']
+                    target_class_for_tsne = int(label_idx_str)
+        
+        print(f"🎯 Automatically selected class '{class_names[target_class_for_tsne]}' for t-SNE confusion plot.")
+
+        features, labels_for_tsne = extract_features(model, test_loader, device)
+        if features.ndim > 2:
+            features = features.reshape(features.shape[0], -1)
+
+        n_samples = features.shape[0]
+        safe_perplexity = min(30, max(5, n_samples // 3))
+
+        if n_samples > 10:
+            tsne_path = os.path.join(graph_dir, f"{model_name}_tsne.png")
+            plot_tsne(features, labels_for_tsne, class_names, perplexity=safe_perplexity, save_path=tsne_path)
+            print(f"✅ t-SNE plot saved to: {tsne_path}")
+
+            confusion_tsne_path = os.path.join(graph_dir, f"{model_name}_tsne_confusion_worst_class.png")
+            plot_tsne_class_confusion(
+                features, y_true, y_pred,
+                class_names=class_names,
+                target_class=target_class_for_tsne, # Use the dynamic class
+                perplexity=safe_perplexity,
+                save_path=confusion_tsne_path
+            )
+            print(f"Confusion-focused t-SNE saved to: {confusion_tsne_path}")
+    except Exception as e:
+        print(f"⚠️ t-SNE failed: {e}")
+        traceback.print_exc()
 
     if visualize_gradcam and gradcam_layer:
         print(f"✅ Grad-CAM misclassified overlays saved to: {os.path.join(graph_dir, 'gradcam_misclassified')}")

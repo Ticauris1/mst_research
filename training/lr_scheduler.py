@@ -59,7 +59,7 @@ class HybridLRScheduler:
                         for i, group in enumerate(self.optimizer.param_groups):
                             new_lr = max(group['lr'] * self.plateau_factor, self.min_lr)
                             group['lr'] = new_lr
-                            print(f"🔻 Plateau: Reducing LR group {i} to {new_lr:.6f}")
+                            print(f"Plateau: Reducing LR group {i} to {new_lr:.6f}")
                         self.epochs_since_improvement = 0
 
         self.current_epoch += 1

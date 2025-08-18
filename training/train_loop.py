@@ -1,6 +1,9 @@
 import os
 import copy
 import gc
+from tqdm import tqdm # type: ignore
+from contextlib import nullcontext
+import time
 import numpy as np # type: ignore
 import torch # type: ignore
 import torch.nn as nn # type: ignore
@@ -10,8 +13,11 @@ from training.lr_scheduler import HybridLRScheduler # type: ignore
 from training.utils import GradualUnfreezer, PostWarmupLRScheduler, freeze_backbone, FocalLoss
 from training.utils import setup_directories, compute_classwise_alpha # Removed plot_alpha_trends as it's likely a plotting function
 from training.mixup_utils import mixup_data, mixup_criterion # type: ignore
-from evaluation.plot_utils import plot_training_curves # type: ignore
+#from evaluation.plot_utils import plot_training_curves # type: ignore
+from contextlib import nullcontext
+import sys, time
 import traceback
+
 
 # === Main Training Loop ===
 def local_train(
@@ -112,13 +118,13 @@ def local_train(
     # Attempt to load checkpoint if a resume_path is provided and valid
     if resume_path and os.path.isfile(resume_path):
         try:
-            print(f"🔁 Attempting to resume training from checkpoint: {resume_path}")
+            print(f"Attempting to resume training from checkpoint: {resume_path}")
             checkpoint = torch.load(resume_path, map_location=device)
             model.load_state_dict(checkpoint["model_state"])
             optimizer.load_state_dict(checkpoint["optimizer_state"])
             best_val_accuracy = checkpoint.get("best_val_accuracy", 0.0)
             start_epoch = checkpoint.get("epoch", 0) + 1
-            print(f"✅ Successfully resumed training from checkpoint at Epoch {start_epoch}")
+            print(f"Successfully resumed training from checkpoint at Epoch {start_epoch}")
         except Exception as e:
             # If loading fails (e.g., corrupted file, parameter group mismatch)
             print(f"⚠️ Failed to load checkpoint from {resume_path}: {e}")
@@ -128,7 +134,7 @@ def local_train(
             start_epoch = 0
             early_stop_counter = 0
     else:
-        print(f"ℹ️ No valid checkpoint found at {resume_path}. Starting training from scratch (Epoch 0).")
+        print(f"No valid checkpoint found at {resume_path}. Starting training from scratch (Epoch 0).")
 
     # === Initial backbone freezing ===
     # Freeze the backbone layers of the model during early warmup epochs
@@ -302,7 +308,7 @@ def local_train(
         else:
             early_stop_counter += 1
             if early_stop_counter >= early_stop_patience:
-                print("⏹️ Early stopping triggered.")
+                print("Early stopping triggered.")
                 break # Stop training if no improvement for 'patience' epochs
 
         # === Save checkpoint ===
@@ -334,3 +340,9 @@ def local_train(
         "val_acc": val_acc_history,
         "lrs": lrs_history
     }
+
+
+
+
+
+

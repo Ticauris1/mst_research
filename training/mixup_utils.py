@@ -21,7 +21,10 @@ def mixup_data(x, y, skin_vec, alpha=0.2, epoch=0, warmup_epochs=5):
     if epoch < warmup_epochs:
         lam = 1.0
     else:
-        lam = float(np.clip(np.random.beta(alpha, alpha), 0.3, 0.7))
+        alpha_val = float(alpha.detach().cpu().numpy()) if torch.is_tensor(alpha) else float(alpha)
+        lam = float(np.clip(np.random.beta(alpha_val, alpha_val), 0.3, 0.7))
+
+        #lam = float(np.clip(np.random.beta(alpha, alpha), 0.3, 0.7))
 
     index = torch.randperm(x.size(0)).to(x.device)
     mixed_x = lam * x + (1 - lam) * x[index]
