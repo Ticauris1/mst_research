@@ -1,0 +1,28 @@
+FairFace Skin Tone Fairness Research
+Project Overview
+This project provides a comprehensive research pipeline for assessing and enhancing fairness in race classification models using the FairFace dataset. 
+The work combines deep learning, skin-tone-aware preprocessing, stratified sampling, attention mechanisms, feature-fusion networks, and multiple fairness evaluation techniques to assess model performance across different demographic groups. 
+The notebook implements an end-to-end system for training, validating, and analyzing convolutional neural networks, with an emphasis on reducing bias and maintaining performance stability among Monk Skin Tone (MST) groups.
+
+Research Objectives
+The main goal of this project is to explore performance disparities associated with sensitive attributes, particularly skin tone variation. 
+The system assesses demographic imbalance, performs MST-aware stratified sampling, incorporates skin-vector conditioning with ITA, hue, and MST one-hot encodings, and employs spatial attention mechanisms like CBAM and FiLM modulation. 
+Additional aims include identifying class-confusion patterns, improving separation between difficult-to-classify groups using triplet-based embeddings, and generating interpretable explanations with Grad-CAM.
+
+
+Technical Approach
+The notebook features a modular training framework built with PyTorch. It evaluates EfficientNet-based backbones with and without CBAM and FiLM conditioning.
+A secondary input stream for skin-tone features is processed through a dedicated multilayer perceptron. Fusion strategies involve late concatenation, projection-based fusion, and gated fusion. 
+A thorough data-loading and sampling system provides MST-balanced mini-batches to reduce demographic bias. The project also visualizes learned embeddings using t-SNE, 
+trains triplet networks to improve class separation, applies fairness-focused focal-loss weighting, utilizes dynamic data augmentation scheduling, and implements detailed cross-validation routines.
+
+Evaluation and Metrics
+The system calculates accuracy, F1-score, macro-averaged metrics, ROC curves, class-wise calibration, confusion matrices, MST-specific fairness plots, and error distribution analyses per class. 
+Grad-CAM visualizations help verify that attention mechanisms and fairness interventions modify feature focus. The pipeline supports multi-fold cross-validation and allows comparison of different models across various backbones and attention setups.
+
+System Design Summary
+This project showcases advanced capabilities in deep learning research, fairness analysis, data preprocessing, and model explainability. 
+It integrates skin-tone assessment, balanced sampling, feature-fusion networks, and attention mechanisms within a reproducible research framework. TThe notebook is organized to facilitate systematic experimentation, model comparison, and documentation of findings related to fairness-aware computer vision.
+
+Author
+Ticauris “Ti” Stokes
